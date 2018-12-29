@@ -1,5 +1,6 @@
 CREATE TABLE mutelist (
     account INTEGER PRIMARY KEY,
+    start_time INTEGER,
     end_time INTEGER,
     reason varchar(256),
     admin_account INTEGER
@@ -10,6 +11,7 @@ CREATE INDEX account_mutes ON mutelist (account);
 
 CREATE TABLE gaglist (
     account INTEGER PRIMARY KEY,
+    start_time INTEGER,
     end_time INTEGER,
     reason varchar(256),
     admin_account INTEGER
