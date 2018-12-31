@@ -128,7 +128,7 @@ public Action RepeatedTimerHandler(Handle timer) {
             // if we have a valid steam account id, we must query for it in the database.
             // If we have a valid match by account, we check if the punishment has been fulfilled.
             // If it has, we can ungag/unmute the player immediately.
-            // This allows for "real-time" (give or take however long the timer interval is) tracking of the 
+            // This allows for "real-time" (give or take however long the timer interval is) tracking of the punishment.
             if (account != 0) {
                 RemoveExpiredPlayerPunishment(account, time, i, MUTE);
                 RemoveExpiredPlayerPunishment(account, time, i, GAG);
@@ -210,9 +210,7 @@ public void DeleteExpiredPunishments(int time, Punishment punishment) {
     SQL_UnlockDatabase(g_ShutupDatabase);
 
     // finally, delete our query
-    if (g_DeleteQuery) {
-        delete g_DeleteQuery;
-    }
+    delete g_DeleteQuery;
 }
 
 // ----------------------------------------- END: Timer Command Functions -------------------------------------------------------- //
