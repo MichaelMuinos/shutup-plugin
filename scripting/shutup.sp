@@ -258,16 +258,16 @@ public void IssuePunishmentCommand(int client, int args, Punishment punishment) 
     }
 
     char time[50], arg_string[256];
-	GetCmdArgString(arg_string, sizeof(arg_string));
-	
-	int len, total_len;
-	if ((len = BreakString(arg_string, time, sizeof(time))) == -1) {
-		char command[64];
-		GetCmdArg(0, command, sizeof(command));
-		ReplyToCommand(client, "Usage: %s <time> <name>", command);
-		return;
-	}
-	total_len += len;
+    GetCmdArgString(arg_string, sizeof(arg_string));
+
+    int len, total_len;
+    if ((len = BreakString(arg_string, time, sizeof(time))) == -1) {
+	char command[64];
+	GetCmdArg(0, command, sizeof(command));
+	ReplyToCommand(client, "Usage: %s <time> <name>", command);
+	return;
+    }
+    total_len += len;
 
     // find the target client
     int target = FindTarget(client, arg_string[total_len]);
