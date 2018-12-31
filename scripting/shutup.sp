@@ -180,17 +180,18 @@ public void RemoveExpiredPlayerPunishment(int account, int time, int client, Pun
 }
 
 public void DeleteExpiredPunishments(int time, Punishment punishment) {
-    char error[256], tableName[256];
+    char error[256], tableName[256], queryStr[1024];
     Format(tableName,
            sizeof(tableName),
            punishment == MUTE ? "mutelist" : "gaglist");
+    Format(queryStr,
+           sizeof(queryStr),
+           "DELETE FROM %s WHERE end_time != 0 AND end_time < ?;",
+           tableName);
     // now, we must query through our database and remove any punishments that are already fulfilled.
     // This is needed to ensure the tables are not filled with "dead" punishments.
     // i.e. where the current time is greater than the end_time.
-    DBStatement g_DeleteQuery = SQL_PrepareQuery(g_ShutupDatabase,
-                                                 "DELETE FROM ? WHERE end_time != 0 AND end_time < ?;",
-                                                 error,
-                                                 sizeof(error));  
+    DBStatement g_DeleteQuery = SQL_PrepareQuery(g_ShutupDatabase, queryStr, error, sizeof(error));  
                                                                                               
     // check to ensure the query was created properly
     if (!g_DeleteQuery) {
@@ -199,8 +200,7 @@ public void DeleteExpiredPunishments(int time, Punishment punishment) {
     }
 
     // bind our query with the table name and time
-    g_DeleteQuery.BindString(0, tableName, false);
-    g_DeleteQuery.BindInt(1, time);
+    g_DeleteQuery.BindInt(0, time);
 
     // Lock the database
     SQL_LockDatabase(g_ShutupDatabase);
@@ -262,10 +262,10 @@ public void IssuePunishmentCommand(int client, int args, Punishment punishment) 
 
     int len, total_len;
     if ((len = BreakString(arg_string, time, sizeof(time))) == -1) {
-	char command[64];
-	GetCmdArg(0, command, sizeof(command));
-	ReplyToCommand(client, "Usage: %s <time> <name>", command);
-	return;
+        char command[64];
+        GetCmdArg(0, command, sizeof(command));
+        ReplyToCommand(client, "Usage: %s <time> <name>", command);
+        return;
     }
     total_len += len;
 
@@ -334,15 +334,16 @@ public void RemovePunishmentCommand(int client, int args, Punishment punishment)
 }
 
 public void AddOrReplacePunishment(int account, int minutes, int source, Punishment punishment) {
-    char error[256], tableName[256];
+    char error[256], tableName[256], queryStr[1024];
     Format(tableName,
            sizeof(tableName),
            punishment == MUTE ? "mutelist" : "gaglist");
+    Format(queryStr,
+           sizeof(queryStr),
+           "INSERT INTO %s (account, start_time, end_time, admin_account) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE start_time = ?, end_time = ?, admin_account = ?;",
+           tableName);
     // Create our query for adding a punishment
-    DBStatement g_AddQuery = SQL_PrepareQuery(g_ShutupDatabase,     // reference to DB object
-                                              "INSERT INTO ? (account, start_time, end_time, admin_account) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE start_time = ?, end_time = ?, admin_account = ?;",  // query statement
-                                              error,      // error buffer
-                                              sizeof(error));     // size of error buffer
+    DBStatement g_AddQuery = SQL_PrepareQuery(g_ShutupDatabase, queryStr, error, sizeof(error));
 
     if (!g_AddQuery) {
         LogAction(0, -1, "Could not create prepared statement g_AddQuery in AddPunishment: %s", error);
@@ -354,14 +355,13 @@ public void AddOrReplacePunishment(int account, int minutes, int source, Punishm
     int sourceAccount = source ? GetSteamAccountID(source) : 0;
     
     // create insert query with data
-    g_AddQuery.BindString(0, tableName, false);
-    g_AddQuery.BindInt(1, account);
-    g_AddQuery.BindInt(2, GetTime());
-    g_AddQuery.BindInt(3, endTime);
-    g_AddQuery.BindInt(4, sourceAccount);
-    g_AddQuery.BindInt(5, GetTime());
-    g_AddQuery.BindInt(6, endTime);
-    g_AddQuery.BindInt(7, sourceAccount);
+    g_AddQuery.BindInt(0, account);
+    g_AddQuery.BindInt(1, GetTime());
+    g_AddQuery.BindInt(2, endTime);
+    g_AddQuery.BindInt(3, sourceAccount);
+    g_AddQuery.BindInt(4, GetTime());
+    g_AddQuery.BindInt(5, endTime);
+    g_AddQuery.BindInt(6, sourceAccount);
     
     // lock the database
     SQL_LockDatabase(g_ShutupDatabase);
@@ -414,14 +414,15 @@ public void RemovePunishmentByAdmin(int account, int client, int target, Punishm
 }
 
 public void DeleteClientPunishment(int account, Punishment punishment) {
-    char error[256], tableName[256];
+    char error[256], tableName[256], queryStr[1024];
     Format(tableName,
            sizeof(tableName),
            punishment == MUTE ? "mutelist" : "gaglist");
-    DBStatement g_DeleteQuery = SQL_PrepareQuery(g_ShutupDatabase,
-                                                 "DELETE FROM ? WHERE account = ?;",
-                                                 error,
-                                                 sizeof(error));  
+    Format(queryStr,
+           sizeof(queryStr),
+           "DELETE FROM %s WHERE account = ?;",
+           tableName);
+    DBStatement g_DeleteQuery = SQL_PrepareQuery(g_ShutupDatabase, queryStr, error, sizeof(error));  
                                                                                               
     // check to ensure the query was created properly
     if (!g_DeleteQuery) {
@@ -429,9 +430,8 @@ public void DeleteClientPunishment(int account, Punishment punishment) {
         return;
     }
 
-    // bind our query with the table name and account
-    g_DeleteQuery.BindString(0, tableName, false);
-    g_DeleteQuery.BindInt(1, account);
+    // bind our query with the account
+    g_DeleteQuery.BindInt(0, account);
 
     // Lock the database
     SQL_LockDatabase(g_ShutupDatabase);
