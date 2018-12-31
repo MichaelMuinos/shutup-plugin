@@ -2,11 +2,11 @@
 #include <basecomm>
 #include <regex>
 
-#define PLUGIN_VERSION "0.0.1"
+#define PLUGIN_VERSION "1.0.0"
 
 public Plugin myinfo = {
     name = "Shutup Plugin",
-    author = "Michael Muinos",
+    author = "Michael (JustPlainGoat) Muinos",
     description = "Ability to Perma-mute and Perma-gag a player.",
     version = PLUGIN_VERSION,
     url = "https://github.com/MichaelMuinos/Shutup-Plugin"
@@ -15,17 +15,17 @@ public Plugin myinfo = {
 // Database object
 Database g_ShutupDatabase;
 
-// DBStatement object used for adding a muted account
-DBStatement g_AddMuteQuery;
-
-// DBStatement object used for adding a gagged account
-DBStatement g_AddGagQuery;
-
 // array to cache client mutes
 bool g_ClientMuted[MAXPLAYERS + 1];
 
 // array to cache client gags
 bool g_ClientGagged[MAXPLAYERS + 1];
+
+// keeps track of the available punishments
+enum Punishment {
+    MUTE,
+    GAG
+}
 
 public void OnPluginStart() {
     // Create error buffer
@@ -38,43 +38,26 @@ public void OnPluginStart() {
         SetFailState("Could not connect to shutup accounts database: %s", error);
     }
 
-    // Create our query for adding mute accounts
-    g_AddMuteQuery = SQL_PrepareQuery(g_ShutupDatabase,     // reference to DB object
-                                    "INSERT INTO mutelist (account, start_time, end_time, admin_account) VALUES (?, ?, ?, ?);",  // query statement
-                                    error,      // error buffer
-                                    sizeof(error));     // size of error buffer
-
-    if (!g_AddMuteQuery) {
-        SetFailState("Could not create prepared statement g_AddMuteQuery: %s", error);
-    }
-
-    // Create our query for adding gag accounts
-    g_AddGagQuery = SQL_PrepareQuery(g_ShutupDatabase,     // reference to DB object
-                                    "INSERT INTO gaglist (account, start_time, end_time, admin_account) VALUES (?, ?, ?, ?);",   // query statement
-                                    error,      // error buffer
-                                    sizeof(error));     // size of error buffer
-
-    if (!g_AddGagQuery) {
-        SetFailState("Could not create prepared statement g_AddGagQuery: %s", error);
-    }
-
     // Create a repeated timer to poll all mute and gagged players.
     // This is used to unmute/ungag players when the time runs out
     // and delete rows from the database that are no longer needed.
     CreateTimer(60.0, RepeatedTimerHandler, _, TIMER_REPEAT);
 
-    // RegAdminCmd("sm_p_mute", Perma_Mute, ADMFLAG_ROOT);
-    // RegAdminCmd("sm_p_unmute", Perma_Unmute, ADMFLAG_SLAY);
+    RegAdminCmd("sm_p_mute", Perma_Mute, ADMFLAG_ROOT);
+    RegAdminCmd("sm_p_unmute", Perma_Unmute, ADMFLAG_ROOT);
     RegAdminCmd("sm_p_gag", Perma_Gag, ADMFLAG_ROOT);
     RegAdminCmd("sm_p_ungag", Perma_Ungag, ADMFLAG_ROOT);
-    // RegAdminCmd("sm_p_silence", Perma_Silence, ADMFLAG_SLAY);
-    // RegAdminCmd("sm_p_unsilence", Perma_Unsilence, ADMFLAG_SLAY);
+    RegAdminCmd("sm_p_silence", Perma_Silence, ADMFLAG_ROOT);
+    RegAdminCmd("sm_p_unsilence", Perma_Unsilence, ADMFLAG_ROOT);
 }
 
 public void OnPluginEnd() {
-    delete g_AddMuteQuery;
-    delete g_AddGagQuery;
+    if (g_ShutupDatabase) {
+        delete g_ShutupDatabase;
+    }
 }
+
+// ----------------------------------------- START: Client Connected Functions -------------------------------------------------------- //
 
 public void OnClientConnected(int client) {
     g_ClientMuted[client] = false;
@@ -84,20 +67,58 @@ public void OnClientConnected(int client) {
 public void OnClientAuthorized(int client) {
     int account = GetSteamAccountID(client);
     // query our database
-    GagClientIfUnfulfilledPunishment(account, client);
-    MuteClientIfUnfulfilledPunishment(account, client);
+    ContinueOngoingPlayerPunishment(account, client, MUTE);
+    ContinueOngoingPlayerPunishment(account, client, GAG);
+}
+
+public void ContinueOngoingPlayerPunishment(int account, int client, Punishment punishment) {
+    char queryStr[1024], tableName[256];
+    Format(tableName,
+           sizeof(tableName),
+           punishment == MUTE ? "mutelist" : "gaglist");
+    Format(queryStr,
+           sizeof(queryStr),
+           "SELECT account FROM %s WHERE account = %d AND (end_time > %d OR end_time = 0)",
+           tableName,
+           account,
+           GetTime());
+
+    // Lock the database
+    SQL_LockDatabase(g_ShutupDatabase);
+    // Query for the results
+    DBResultSet query = SQL_Query(g_ShutupDatabase, queryStr);
+    // Unlock the database
+    SQL_UnlockDatabase(g_ShutupDatabase);
+
+    if (query) {
+        if (client && query.RowCount) {
+            if (punishment == MUTE) {
+                g_ClientMuted[client] = true;
+            } else {
+                g_ClientGagged[client] = true;
+            }
+
+            if (IsClientInGame(client)) {
+                OnClientPutInServer(client);
+            }
+        }
+        // delete our query
+        delete query;
+    }
 }
 
 public void OnClientPutInServer(int client) {
     if (g_ClientMuted[client]) {
         BaseComm_SetClientMute(client, true);
-        LogAction(0, client, "Muted \"%L\" for an ongoing mute punishment.", client);
     }
     if (g_ClientGagged[client]) {
         BaseComm_SetClientGag(client, true);
-        LogAction(0, client, "Gagged \"%L\" for an ongoing gag punishment.", client);
     }
 }
+
+// ----------------------------------------- END: Client Connected Functions -------------------------------------------------------- //
+
+// ----------------------------------------- START: Timer Command Functions -------------------------------------------------------- //
 
 public Action RepeatedTimerHandler(Handle timer) {
     int time = GetTime();
@@ -107,209 +128,133 @@ public Action RepeatedTimerHandler(Handle timer) {
             // if we have a valid steam account id, we must query for it in the database.
             // If we have a valid match by account, we check if the punishment has been fulfilled.
             // If it has, we can ungag/unmute the player immediately.
-            // This allows for "real-time" (give or take however long the timer interval is) tracking of the punishment.
+            // This allows for "real-time" (give or take however long the timer interval is) tracking of the 
             if (account != 0) {
-                UngagClientIfFulfilledPunishment(account, time, i);
+                RemoveExpiredPlayerPunishment(account, time, i, MUTE);
+                RemoveExpiredPlayerPunishment(account, time, i, GAG);
             }
         }
     }
     
-    // delete any gag punishments that are expired.
+    // delete any mute/gag punishments that are expired.
     // i.e. the current time is greater than the end time
-    DeleteExpiredGagPunishments(time);
+    DeleteExpiredPunishments(time, MUTE);
+    DeleteExpiredPunishments(time, GAG);
 
     return Plugin_Continue;
 }
 
-public void GagClientIfUnfulfilledPunishment(int account, int client) {
-    char gagQuery[1024];
-    // query database for gag
-    Format(gagQuery,
-           sizeof(gagQuery),
-           "SELECT account FROM gaglist WHERE account = %d AND (end_time > %d OR end_time = 0)",
-           account,
-           GetTime());
-
-    // Lock the database
-    SQL_LockDatabase(g_ShutupDatabase);
-    // Query for the results
-    DBResultSet query = SQL_Query(g_ShutupDatabase, gagQuery);
-    // Unlock the database
-    SQL_UnlockDatabase(g_ShutupDatabase);
-    
-    if (client && query && query.RowCount) {
-        g_ClientGagged[client] = true;
-        if (IsClientInGame(client)) {
-            OnClientPutInServer(client);
-        }
-    }
-}
-
-public void MuteClientIfUnfulfilledPunishment(int account, int client) {
-    char muteQuery[1024];
-    // query database for mute
-    Format(muteQuery,       // buffer for query
-           sizeof(muteQuery),       // size of buffer
-           "SELECT account FROM mutelist WHERE account = %d AND (end_time > %d OR end_time = 0)",   // query statement
-           account,     // account id to query by
-           GetTime());      // current time to be used for comparing to end_time column
-    
-    // Lock the database
-    SQL_LockDatabase(g_ShutupDatabase);
-    // Query for the results
-    DBResultSet query = SQL_Query(g_ShutupDatabase, muteQuery);
-    // Unlock the database
-    SQL_UnlockDatabase(g_ShutupDatabase);
-
-    if (client && query && query.RowCount) {
-        g_ClientMuted[client] = true;
-        if (IsClientInGame(client)) {
-            OnClientPutInServer(client);
-        }
-    }
-}
-
-public void UngagClientIfFulfilledPunishment(int account, int time, int client) {
+public void RemoveExpiredPlayerPunishment(int account, int time, int client, Punishment punishment) {
     // Create the query
-    char gagQuery[1024];
-    Format(gagQuery,
-            sizeof(gagQuery),
-            "SELECT account FROM gaglist WHERE account = %d AND end_time != 0 AND end_time < %d",
-            account,
-            time);
+    char queryStr[1024], tableName[256];
+    Format(tableName,
+           sizeof(tableName),
+           punishment == MUTE ? "mutelist" : "gaglist");
+    Format(queryStr,
+           sizeof(queryStr),
+           "SELECT account FROM %s WHERE account = %d AND end_time != 0 AND end_time < %d",
+           tableName,
+           account,
+           time);
     
     // Lock the database
     SQL_LockDatabase(g_ShutupDatabase);
     // Query for the results
-    DBResultSet query = SQL_Query(g_ShutupDatabase, gagQuery);
+    DBResultSet query = SQL_Query(g_ShutupDatabase, queryStr);
     // Unlock the database
     SQL_UnlockDatabase(g_ShutupDatabase);
 
     // Check if the user fulfilled the punishment.
-    // If he/she has, we can ungag immediately if there are still in the game. 
-    if (IsClientInGame(client) && query && query.RowCount) {
-        BaseComm_SetClientGag(client, false);
-        LogAction(0, client, "Ungagged \"%L\". Punishment has been fulfilled.", client);
-    }
-
-    // finally, delete our query
-    delete query;
-}
-
-public void UngagClientIfHasPunishment(int account, int client) {
-    // Create the query
-    char gagQuery[1024];
-    Format(gagQuery,
-            sizeof(gagQuery),
-            "SELECT account FROM gaglist WHERE account = %d",
-            account);
-    
-    // Lock the database
-    SQL_LockDatabase(g_ShutupDatabase);
-    // Query for the results
-    DBResultSet query = SQL_Query(g_ShutupDatabase, gagQuery);
-    // Unlock the database
-    SQL_UnlockDatabase(g_ShutupDatabase);
-
+    // If he/she has, we can unmute/ungag immediately if they are still in the game. 
     if (query) {
-        // if we have a result, that means we can delete the punishment from the database
-        if (query.RowCount) {
-            // if our client is in the game, we can ungag immediately
-            if (IsClientInGame(client)) {
+        if (IsClientInGame(client) && query.RowCount) {
+            if (punishment == MUTE) {
+                BaseComm_SetClientMute(client, false);
+            } else {
                 BaseComm_SetClientGag(client, false);
-                LogAction(0, client, "Ungagged \"%L\". Punishment has been removed by an admin.", client);
             }
-            DeleteClientGagPunishment(account);
         }
+        // delete the query
+        delete query;
     }
-
-    delete query;
 }
 
-public void DeleteClientGagPunishment(int account) {
-    char error[256];
-    DBStatement g_DeleteGagQuery = SQL_PrepareQuery(g_ShutupDatabase,
-                                                    "DELETE FROM gaglist WHERE account = ?;",
-                                                    error,
-                                                    sizeof(error));  
-                                                                                              
-    // check to ensure the query was created properly
-    if (!g_DeleteGagQuery) {
-        LogAction(0, -1, "Could not create prepared statement g_DeleteGagQuery: %s", error);
-        return;
-    }
-
-    // bind our query with the time
-    g_DeleteGagQuery.BindInt(0, account);
-
-    // Lock the database
-    SQL_LockDatabase(g_ShutupDatabase);
-    // execute the query
-    SQL_Execute(g_DeleteGagQuery);
-    // Unlock the database
-    SQL_UnlockDatabase(g_ShutupDatabase);
-
-    // delete the query
-    delete g_DeleteGagQuery;
-}
-
-public void DeleteExpiredGagPunishments(int time) {
-    char error[256];
+public void DeleteExpiredPunishments(int time, Punishment punishment) {
+    char error[256], tableName[256];
+    Format(tableName,
+           sizeof(tableName),
+           punishment == MUTE ? "mutelist" : "gaglist");
     // now, we must query through our database and remove any punishments that are already fulfilled.
     // This is needed to ensure the tables are not filled with "dead" punishments.
     // i.e. where the current time is greater than the end_time.
-    DBStatement g_DeleteGagQuery = SQL_PrepareQuery(g_ShutupDatabase,
-                                                    "DELETE FROM gaglist WHERE end_time != 0 AND end_time < ?;",
-                                                    error,
-                                                    sizeof(error));  
+    DBStatement g_DeleteQuery = SQL_PrepareQuery(g_ShutupDatabase,
+                                                 "DELETE FROM ? WHERE end_time != 0 AND end_time < ?;",
+                                                 error,
+                                                 sizeof(error));  
                                                                                               
     // check to ensure the query was created properly
-    if (!g_DeleteGagQuery) {
-        LogAction(0, -1, "Could not create prepared statement g_DeleteGagQuery: %s", error);
+    if (!g_DeleteQuery) {
+        LogAction(0, -1, "Could not create prepared statement g_DeleteQuery in DeleteExpiredPunishments: %s", error);
         return;
     }
 
-    // bind our query with the time
-    g_DeleteGagQuery.BindInt(0, time);
+    // bind our query with the table name and time
+    g_DeleteQuery.BindString(0, tableName, false);
+    g_DeleteQuery.BindInt(1, time);
 
     // Lock the database
     SQL_LockDatabase(g_ShutupDatabase);
     // execute the query
-    SQL_Execute(g_DeleteGagQuery);
+    SQL_Execute(g_DeleteQuery);
     // Unlock the database
     SQL_UnlockDatabase(g_ShutupDatabase);
 
-    // delete the query
-    delete g_DeleteGagQuery;
+    // finally, delete our query
+    if (g_DeleteQuery) {
+        delete g_DeleteQuery;
+    }
 }
 
-public void AddGagPunishment(int account, int minutes, int source) {
-    // convert minutes to seconds
-    int endTime = minutes ? (GetTime() + (minutes * 60)) : 0;
-    int sourceAccount = source ? GetSteamAccountID(source) : 0;
-    
-    // create insert query with data
-    g_AddGagQuery.BindInt(0, account);
-    g_AddGagQuery.BindInt(1, GetTime());
-    g_AddGagQuery.BindInt(2, endTime);
-    g_AddGagQuery.BindInt(3, sourceAccount);
-    
-    // lock the database
-    SQL_LockDatabase(g_ShutupDatabase);
-    // execute the query
-    SQL_Execute(g_AddGagQuery);
-    // unlock the database
-    SQL_UnlockDatabase(g_ShutupDatabase);
+// ----------------------------------------- END: Timer Command Functions -------------------------------------------------------- //
+
+public Action Perma_Mute(int client, int args) {
+    IssuePunishmentCommand(client, args, MUTE);
+    return Plugin_Handled;
 }
 
-// ----------------------------------------- START: Actions for admin commands -------------------------------------------------------- //
+public Action Perma_Unmute(int client, int args) {
+    RemovePunishmentCommand(client, args, MUTE);
+    return Plugin_Handled;
+}
 
 public Action Perma_Gag(int client, int args) {
+    IssuePunishmentCommand(client, args, GAG);
+    return Plugin_Handled;
+}
+
+public Action Perma_Ungag(int client, int args) {
+    RemovePunishmentCommand(client, args, GAG);
+    return Plugin_Handled;
+}
+
+public Action Perma_Silence(int client, int args) {
+    IssuePunishmentCommand(client, args, MUTE);
+    IssuePunishmentCommand(client, args, GAG);
+    return Plugin_Handled;
+}
+
+public Action Perma_Unsilence(int client, int args) {
+    RemovePunishmentCommand(client, args, MUTE);
+    RemovePunishmentCommand(client, args, GAG);
+    return Plugin_Handled;
+}
+
+public void IssuePunishmentCommand(int client, int args, Punishment punishment) {
     if (args < 2) {
         char command[64];
         GetCmdArg(0, command, sizeof(command));
         ReplyToCommand(client, "Usage: %s <time> <name>", command);
-        return Plugin_Handled;
+        return;
     }
 
     char time[50], arg_string[256];
@@ -320,7 +265,7 @@ public Action Perma_Gag(int client, int args) {
 		char command[64];
 		GetCmdArg(0, command, sizeof(command));
 		ReplyToCommand(client, "Usage: %s <time> <name>", command);
-		return Plugin_Handled;
+		return;
 	}
 	total_len += len;
 
@@ -328,64 +273,173 @@ public Action Perma_Gag(int client, int args) {
     int target = FindTarget(client, arg_string[total_len]);
     if (target == -1) {
         ReplyToCommand(client, "Could not find client with name \"%s\"", arg_string[total_len]);
-        return Plugin_Handled;
+        return;
     }
 
     // extract the steam account id from the target
     int account = GetSteamAccountID(target);
     if (account == 0) {
         ReplyToCommand(client, "Could not fetch steam account ID from client \"%s\"", arg_string[total_len]);
-        return Plugin_Handled;
+        return;
     }
 	
-    // save the account to the gaglist table to carry out the punishment
+    // save the account to the table to carry out the punishment
     int minutes = StringToInt(time);
-    AddGagPunishment(account, minutes, client);
-    LogAction(client, -1, "\"%L\" added mute (minutes \"%d\") (id \"%d\")", client, minutes, account);
+    AddOrReplacePunishment(account, minutes, client, punishment);
+    ReplyToCommand(client, "Added %s (minutes \"%d\") (id \"%d\")", punishment == MUTE ? "mute" : "gag", minutes, account);
 
-    // immediately gag player if they are in the server
+    // immediately perform punishment to player if they are in the server
     if (IsClientInGame(target)) {
-        BaseComm_SetClientGag(target, true);
-        g_ClientGagged[target] = true;
-        LogAction(0, target, "Gagged \"%L\" to start the gag punishment.", target);
+        if (punishment == MUTE) {
+            BaseComm_SetClientMute(target, true);
+            g_ClientMuted[target] = true;
+            ReplyToCommand(client, "Muted \"%L\" to start the mute ", target);
+        } else {
+            BaseComm_SetClientGag(target, true);
+            g_ClientGagged[target] = true;
+            ReplyToCommand(client, "Gagged \"%L\" to start the gag ", target);
+        }
     }
-
-    // end
-    return Plugin_Handled;
 }
 
-public Action Perma_Ungag(int client, int args) {
+public void RemovePunishmentCommand(int client, int args, Punishment punishment) {
     if (args < 1) {
         char command[64];
         GetCmdArg(0, command, sizeof(command));
         ReplyToCommand(client, "Usage: %s <name>", command);
-        return Plugin_Handled;
+        return;
     }
 
     char arg_string[256];
     GetCmdArgString(arg_string, sizeof(arg_string));
 
-    LogAction(0, -1, "Ungag for name %s", arg_string[0]);
+    LogAction(0, -1, "%s for name %s", punishment == MUTE ? "mute" : "gag", arg_string[0]);
 
     // find target client
     int target = FindTarget(client, arg_string[0]);
     if (target == -1) {
         ReplyToCommand(client, "Could not find client with name \"%s\"", arg_string[0]);
-        return Plugin_Handled;
+        return;
     }
 
     // extract the steam account id from the target
     int account = GetSteamAccountID(target);
     if (account == 0) {
         ReplyToCommand(client, "Could not fetch steam account ID from client \"%s\"", arg_string[0]);
-        return Plugin_Handled;
+        return;
     }
 
-    // ungag client and remove punishment from database if present
-    UngagClientIfHasPunishment(account, target);   
-
-    // end
-    return Plugin_Handled; 
+    // remove punishment from client and remove punishment from database if present
+    RemovePunishmentByAdmin(account, client, target, punishment);
 }
 
-// ----------------------------------------- END: Actions for admin commands -------------------------------------------------------- //
+public void AddOrReplacePunishment(int account, int minutes, int source, Punishment punishment) {
+    char error[256], tableName[256];
+    Format(tableName,
+           sizeof(tableName),
+           punishment == MUTE ? "mutelist" : "gaglist");
+    // Create our query for adding a punishment
+    DBStatement g_AddQuery = SQL_PrepareQuery(g_ShutupDatabase,     // reference to DB object
+                                              "INSERT INTO ? (account, start_time, end_time, admin_account) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE start_time = ?, end_time = ?, admin_account = ?;",  // query statement
+                                              error,      // error buffer
+                                              sizeof(error));     // size of error buffer
+
+    if (!g_AddQuery) {
+        LogAction(0, -1, "Could not create prepared statement g_AddQuery in AddPunishment: %s", error);
+        return;
+    }
+
+    // convert minutes to seconds
+    int endTime = minutes ? (GetTime() + (minutes * 60)) : 0;
+    int sourceAccount = source ? GetSteamAccountID(source) : 0;
+    
+    // create insert query with data
+    g_AddQuery.BindString(0, tableName, false);
+    g_AddQuery.BindInt(1, account);
+    g_AddQuery.BindInt(2, GetTime());
+    g_AddQuery.BindInt(3, endTime);
+    g_AddQuery.BindInt(4, sourceAccount);
+    g_AddQuery.BindInt(5, GetTime());
+    g_AddQuery.BindInt(6, endTime);
+    g_AddQuery.BindInt(7, sourceAccount);
+    
+    // lock the database
+    SQL_LockDatabase(g_ShutupDatabase);
+    // execute the query
+    SQL_Execute(g_AddQuery);
+    // unlock the database
+    SQL_UnlockDatabase(g_ShutupDatabase);
+
+    delete g_AddQuery;
+}
+
+public void RemovePunishmentByAdmin(int account, int client, int target, Punishment punishment) {
+    // Create the query
+    char queryStr[1024], tableName[256];
+    Format(tableName,
+           sizeof(tableName),
+           punishment == MUTE ? "mutelist" : "gaglist");
+    Format(queryStr,
+           sizeof(queryStr),
+           "SELECT account FROM %s WHERE account = %d",
+           tableName,
+           account);
+    
+    // Lock the database
+    SQL_LockDatabase(g_ShutupDatabase);
+    // Query for the results
+    DBResultSet query = SQL_Query(g_ShutupDatabase, queryStr);
+    // Unlock the database
+    SQL_UnlockDatabase(g_ShutupDatabase);
+
+    if (query) {
+        // if we have a result, that means we can delete the punishment from the database
+        if (query.RowCount) {
+            // if our client is in the game, we can ungag immediately
+            if (IsClientInGame(target)) {
+                if (punishment == MUTE) {
+                    BaseComm_SetClientMute(target, false);
+                    ReplyToCommand(client, "Unmuted \"%L\". Punishment has been removed.", target);
+                } else {
+                    BaseComm_SetClientGag(target, false);
+                    ReplyToCommand(client, "Ungagged \"%L\". Punishment has been removed.", target);
+                }
+            }
+            DeleteClientPunishment(account, punishment);
+        }
+
+        // delete our query
+        delete query;
+    }
+}
+
+public void DeleteClientPunishment(int account, Punishment punishment) {
+    char error[256], tableName[256];
+    Format(tableName,
+           sizeof(tableName),
+           punishment == MUTE ? "mutelist" : "gaglist");
+    DBStatement g_DeleteQuery = SQL_PrepareQuery(g_ShutupDatabase,
+                                                 "DELETE FROM ? WHERE account = ?;",
+                                                 error,
+                                                 sizeof(error));  
+                                                                                              
+    // check to ensure the query was created properly
+    if (!g_DeleteQuery) {
+        LogAction(0, -1, "Could not create prepared statement g_DeleteQuery in DeleteClientPunishment: %s", error);
+        return;
+    }
+
+    // bind our query with the table name and account
+    g_DeleteQuery.BindString(0, tableName, false);
+    g_DeleteQuery.BindInt(1, account);
+
+    // Lock the database
+    SQL_LockDatabase(g_ShutupDatabase);
+    // execute the query
+    SQL_Execute(g_DeleteQuery);
+    // Unlock the database
+    SQL_UnlockDatabase(g_ShutupDatabase);
+
+    // delete the query
+    delete g_DeleteQuery;
+}
