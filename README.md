@@ -1,5 +1,5 @@
 # Shutup: A SourceMod Plugin
-Allows players to be muted and gagged by name with a specified time limit.
+Allows players to be muted via text / voice by name with a specified time limit.
 The punishments are carried out in real time, meaning once the player's punishment
 time limit has expired, they will be unmuted/ungagged immediately.
 
